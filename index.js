@@ -5,8 +5,8 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const TOKEN = process.env.MRFIVE_TOKEN;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const TOKEN = process.env.MRFIVE_TOKEN || "MRFIVE_X9kL_2026_SECURE_TOKEN_8372";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "MrFran_2026PanelSecure";
 const CURRENT_VERSION = process.env.CURRENT_VERSION || "2.0";
 
 const supabase = createClient(
@@ -17,7 +17,7 @@ const supabase = createClient(
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
-  secret: process.env.SESSION_SECRET || "mrfive-secret",
+  secret: process.env.SESSION_SECRET || "mrfive_session_secret",
   resave: false,
   saveUninitialized: false
 }));
@@ -27,53 +27,61 @@ function requireLogin(req, res, next) {
   next();
 }
 
-async function logAttempt(result, key, resource, version, ip) {
-  await supabase.from("logs").insert({
-    result,
+async function addLog(result, key, resource, version, ip) {
+  const { error } = await supabase.from("logs").insert({
+    result: result || "",
     key: key || "",
     resource: resource || "",
     version: version || "",
     ip: ip || ""
   });
+
+  if (error) {
+    console.log("ERROR ADD LOG:", error);
+  }
 }
 
 app.get("/check", async (req, res) => {
   const { token, key, resource, version } = req.query;
-  const ip = req.headers["x-forwarded-for"] || req.ip;
+  const ip = req.headers["x-forwarded-for"] || req.ip || "";
 
   if (token !== TOKEN) {
-    await logAttempt("INVALID_TOKEN", key, resource, version, ip);
+    await addLog("INVALID_TOKEN", key, resource, version, ip);
     return res.send("INVALID_TOKEN");
   }
 
-  const { data: banned } = await supabase
+  const { data: bannedKey, error: bannedError } = await supabase
     .from("banned")
     .select("key")
     .eq("key", key || "")
     .maybeSingle();
 
-  if (banned) {
-    await logAttempt("BANNED", key, resource, version, ip);
+  if (bannedError) console.log("ERROR CHECK BANNED:", bannedError);
+
+  if (bannedKey) {
+    await addLog("BANNED", key, resource, version, ip);
     return res.send("BANNED");
   }
 
-  const { data: license } = await supabase
+  const { data: license, error: licenseError } = await supabase
     .from("licenses")
     .select("key")
     .eq("key", key || "")
     .maybeSingle();
 
+  if (licenseError) console.log("ERROR CHECK LICENSE:", licenseError);
+
   if (!license) {
-    await logAttempt("NO_AUTH", key, resource, version, ip);
+    await addLog("NO_AUTH", key, resource, version, ip);
     return res.send("NO_AUTH");
   }
 
   if (version !== CURRENT_VERSION) {
-    await logAttempt("OUTDATED", key, resource, version, ip);
+    await addLog("OUTDATED", key, resource, version, ip);
     return res.send("OUTDATED");
   }
 
-  await logAttempt("OK", key, resource, version, ip);
+  await addLog("OK", key, resource, version, ip);
   return res.send("OK");
 });
 
@@ -116,29 +124,46 @@ app.get("/logout", (req, res) => {
 });
 
 app.get("/admin", requireLogin, async (req, res) => {
-  const q = (req.query.q || "").trim();
+  const q = (req.query.q || "").trim().toLowerCase();
 
-  const { data: licenses } = await supabase.from("licenses").select("*").order("key");
-  const { data: banned } = await supabase.from("banned").select("*").order("key");
-  const { data: rawLogs } = await supabase.from("logs").select("*").order("id", { ascending: false }).limit(300);
+  const { data: licenses, error: licensesError } = await supabase
+    .from("licenses")
+    .select("*")
+    .order("key", { ascending: true });
 
-  let logs = rawLogs || [];
+  const { data: banned, error: bannedError } = await supabase
+    .from("banned")
+    .select("*")
+    .order("key", { ascending: true });
+
+  const { data: rawLogs, error: logsError } = await supabase
+    .from("logs")
+    .select("*")
+    .order("id", { ascending: false })
+    .limit(300);
+
+  if (licensesError) console.log("ERROR LOAD LICENSES:", licensesError);
+  if (bannedError) console.log("ERROR LOAD BANNED:", bannedError);
+  if (logsError) console.log("ERROR LOAD LOGS:", logsError);
+
+  let filteredLogs = rawLogs || [];
 
   if (q) {
-    logs = logs.filter(l =>
-      (l.key || "").toLowerCase().includes(q.toLowerCase()) ||
-      (l.resource || "").toLowerCase().includes(q.toLowerCase())
+    filteredLogs = filteredLogs.filter(l =>
+      (l.key || "").toLowerCase().includes(q) ||
+      (l.resource || "").toLowerCase().includes(q)
     );
   }
 
-  const okLogs = logs.filter(l => l.result === "OK").length;
-  const badLogs = logs.filter(l => l.result !== "OK").length;
+  const okLogs = filteredLogs.filter(l => l.result === "OK").length;
+  const badLogs = filteredLogs.filter(l => l.result !== "OK").length;
 
   function resultColor(result) {
     if (result === "OK") return "#22c55e";
     if (result === "OUTDATED") return "#f59e0b";
     if (result === "NO_AUTH") return "#ef4444";
     if (result === "BANNED") return "#dc2626";
+    if (result === "INVALID_TOKEN") return "#a855f7";
     return "#94a3b8";
   }
 
@@ -161,6 +186,7 @@ table{width:100%;border-collapse:collapse}
 td,th{border-bottom:1px solid #334155;padding:10px;text-align:left;font-size:14px}
 .small{font-size:13px;color:#94a3b8}
 .keyline{display:flex;gap:10px;align-items:center;margin:8px 0}
+.empty{color:#94a3b8;font-style:italic}
 </style>
 </head>
 <body>
@@ -178,7 +204,7 @@ td,th{border-bottom:1px solid #334155;padding:10px;text-align:left;font-size:14p
 <div class="card">
 <h2>Añadir licencia</h2>
 <form method="POST" action="/add">
-<input name="key" placeholder="cfxk_xxxxx">
+<input name="key" placeholder="cfxk_xxxxx" required>
 <button>Añadir</button>
 </form>
 </div>
@@ -186,7 +212,7 @@ td,th{border-bottom:1px solid #334155;padding:10px;text-align:left;font-size:14p
 <div class="card">
 <h2>Banear licencia</h2>
 <form method="POST" action="/ban">
-<input name="key" placeholder="cfxk_xxxxx">
+<input name="key" placeholder="cfxk_xxxxx" required>
 <button class="danger">Banear</button>
 </form>
 </div>
@@ -202,27 +228,27 @@ td,th{border-bottom:1px solid #334155;padding:10px;text-align:left;font-size:14p
 
 <div class="card">
 <h2 style="color:#22c55e">Autorizadas</h2>
-${(licenses || []).map(l => `
+${(licenses || []).length ? (licenses || []).map(l => `
   <form class="keyline" method="POST" action="/remove">
     <strong>${l.key}</strong>
     <button class="gray" name="key" value="${l.key}">Quitar</button>
   </form>
-`).join("")}
+`).join("") : `<p class="empty">No hay licencias autorizadas.</p>`}
 </div>
 
 <div class="card">
 <h2 style="color:#ef4444">Baneadas</h2>
-${(banned || []).map(l => `
+${(banned || []).length ? (banned || []).map(l => `
   <form class="keyline" method="POST" action="/unban">
     <strong>${l.key}</strong>
     <button name="key" value="${l.key}">Desbanear</button>
   </form>
-`).join("")}
+`).join("") : `<p class="empty">No hay licencias baneadas.</p>`}
 </div>
 
 <div class="card">
-<h2>Logs (${logs.length})</h2>
-<form method="POST" action="/clear-logs">
+<h2>Logs (${filteredLogs.length})</h2>
+<form method="POST" action="/clear-logs" onsubmit="return confirm('¿Seguro que quieres borrar todos los logs?');">
 <button class="danger">Limpiar logs</button>
 </form>
 <br>
@@ -230,7 +256,7 @@ ${(banned || []).map(l => `
 <tr>
 <th>Fecha</th><th>Resultado</th><th>Key</th><th>Resource</th><th>Versión</th><th>IP</th>
 </tr>
-${logs.map(l => `
+${filteredLogs.map(l => `
 <tr>
 <td>${new Date(l.date || l.created_at).toLocaleString()}</td>
 <td style="color:${resultColor(l.result)};font-weight:bold">${l.result}</td>
@@ -249,35 +275,93 @@ ${logs.map(l => `
 });
 
 app.post("/add", requireLogin, async (req, res) => {
-  const key = req.body.key?.trim();
-  if (key) {
-    await supabase.from("licenses").upsert({ key });
-    await supabase.from("banned").delete().eq("key", key);
+  const key = (req.body.key || "").trim();
+
+  if (!key) return res.redirect("/admin");
+
+  const { error: insertError } = await supabase
+    .from("licenses")
+    .upsert({ key }, { onConflict: "key" });
+
+  if (insertError) {
+    console.log("ERROR INSERT LICENSE:", insertError);
+  } else {
+    console.log("LICENCIA AÑADIDA:", key);
   }
+
+  const { error: deleteBanError } = await supabase
+    .from("banned")
+    .delete()
+    .eq("key", key);
+
+  if (deleteBanError) {
+    console.log("ERROR DELETE FROM BANNED:", deleteBanError);
+  }
+
   res.redirect("/admin");
 });
 
 app.post("/remove", requireLogin, async (req, res) => {
-  await supabase.from("licenses").delete().eq("key", req.body.key);
+  const key = (req.body.key || "").trim();
+
+  const { error } = await supabase
+    .from("licenses")
+    .delete()
+    .eq("key", key);
+
+  if (error) console.log("ERROR REMOVE LICENSE:", error);
+
   res.redirect("/admin");
 });
 
 app.post("/ban", requireLogin, async (req, res) => {
-  const key = req.body.key?.trim();
-  if (key) {
-    await supabase.from("banned").upsert({ key });
-    await supabase.from("licenses").delete().eq("key", key);
+  const key = (req.body.key || "").trim();
+
+  if (!key) return res.redirect("/admin");
+
+  const { error: insertBanError } = await supabase
+    .from("banned")
+    .upsert({ key }, { onConflict: "key" });
+
+  if (insertBanError) {
+    console.log("ERROR INSERT BANNED:", insertBanError);
+  } else {
+    console.log("LICENCIA BANEADA:", key);
   }
+
+  const { error: deleteLicenseError } = await supabase
+    .from("licenses")
+    .delete()
+    .eq("key", key);
+
+  if (deleteLicenseError) {
+    console.log("ERROR DELETE FROM LICENSES:", deleteLicenseError);
+  }
+
   res.redirect("/admin");
 });
 
 app.post("/unban", requireLogin, async (req, res) => {
-  await supabase.from("banned").delete().eq("key", req.body.key);
+  const key = (req.body.key || "").trim();
+
+  const { error } = await supabase
+    .from("banned")
+    .delete()
+    .eq("key", key);
+
+  if (error) console.log("ERROR UNBAN:", error);
+
   res.redirect("/admin");
 });
 
 app.post("/clear-logs", requireLogin, async (req, res) => {
-  await supabase.from("logs").delete().neq("id", 0);
+  const { error } = await supabase
+    .from("logs")
+    .delete()
+    .neq("id", 0);
+
+  if (error) console.log("ERROR CLEAR LOGS:", error);
+
   res.redirect("/admin");
 });
 
