@@ -23,6 +23,36 @@ function requireLogin(req, res, next) {
   next()
 }
 
+async function sendDiscordLog(data) {
+  if (!process.env.DISCORD_WEBHOOK_URL) return
+
+  try {
+    await fetch(process.env.DISCORD_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        embeds: [{
+          title: '🔐 MRFIVE License Check',
+          color:
+            data.result === 'OK' ? 5763719 :
+            data.result === 'OUTDATED' ? 16753920 :
+            15548997,
+          fields: [
+            { name: 'Resultado', value: data.result || 'N/A', inline: true },
+            { name: 'Resource', value: data.resource || 'N/A', inline: true },
+            { name: 'Versión', value: data.version || 'N/A', inline: true },
+            { name: 'Key', value: data.key || 'N/A', inline: false },
+            { name: 'IP', value: data.ip || 'N/A', inline: false }
+          ],
+          timestamp: new Date().toISOString()
+        }]
+      })
+    })
+  } catch (err) {
+    console.log('Discord log error:', err)
+  }
+}
+
 function styles() {
   return `
   <style>
@@ -241,6 +271,8 @@ app.post('/clear-logs', requireLogin, async (req, res) => {
 
 async function verifyLicense(req, res) {
   const { token, key, resource, version } = req.query
+  const ip = req.headers['x-forwarded-for'] || req.ip
+
   let result = 'NO_AUTH'
 
   if (token && token !== process.env.MRFIVE_TOKEN) {
@@ -260,8 +292,16 @@ async function verifyLicense(req, res) {
     key,
     resource,
     version,
-    ip: req.headers['x-forwarded-for'] || req.ip
+    ip
   }])
+
+  await sendDiscordLog({
+    result,
+    key,
+    resource,
+    version,
+    ip
+  })
 
   res.send(result)
 }
