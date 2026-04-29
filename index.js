@@ -4,7 +4,7 @@ const { createClient } = require('@supabase/supabase-js')
 
 const app = express()
 
-// ===== CONFIG =====
+// ===== SUPABASE =====
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -56,8 +56,13 @@ app.get('/', requireLogin, async (req, res) => {
   const { data: banned } = await supabase.from('banned').select('*')
   const { data: logs } = await supabase.from('logs').select('*').order('id', { ascending: false })
 
-  const okLogs = logs.filter(l => l.result === 'OK').length
-  const failLogs = logs.length - okLogs
+  // 🔥 FIX NULL
+  const safeLicenses = licenses || []
+  const safeBanned = banned || []
+  const safeLogs = logs || []
+
+  const okLogs = safeLogs.filter(l => l.result === 'OK').length
+  const failLogs = safeLogs.length - okLogs
 
   res.send(`
   <html>
@@ -67,8 +72,8 @@ app.get('/', requireLogin, async (req, res) => {
   <a href="/logout" style="color:red;">Cerrar sesión</a>
 
   <div style="display:flex;gap:20px;margin-top:20px;">
-    <div>Licencias: ${licenses.length}</div>
-    <div>Baneadas: ${banned.length}</div>
+    <div>Licencias: ${safeLicenses.length}</div>
+    <div>Baneadas: ${safeBanned.length}</div>
     <div>Logs OK: ${okLogs}</div>
     <div>Logs fallidos: ${failLogs}</div>
   </div>
@@ -86,7 +91,7 @@ app.get('/', requireLogin, async (req, res) => {
   </form>
 
   <h2>Licencias autorizadas</h2>
-  ${licenses.map(l => `
+  ${safeLicenses.map(l => `
     <div>
       ${l.key}
       <a href="/delete-license/${l.key}">❌</a>
@@ -94,7 +99,7 @@ app.get('/', requireLogin, async (req, res) => {
   `).join('')}
 
   <h2>Licencias baneadas</h2>
-  ${banned.map(l => `
+  ${safeBanned.map(l => `
     <div>
       ${l.key}
       <a href="/unban/${l.key}">♻️</a>
@@ -102,18 +107,14 @@ app.get('/', requireLogin, async (req, res) => {
   `).join('')}
 
   <h2>Logs</h2>
-  <form method="GET">
-    <input name="search" placeholder="Buscar..." />
-    <button>Buscar</button>
-  </form>
 
   <table border="1" cellpadding="5">
     <tr>
       <th>Fecha</th><th>Resultado</th><th>Key</th><th>Resource</th><th>Versión</th>
     </tr>
-    ${logs.map(l => `
-      <tr style="color:${l.result === 'OK' ? 'lime' : 'red'};">
-        <td>${l.date}</td>
+    ${safeLogs.map(l => `
+      <tr style="color:${l.result === 'OK' ? 'lime' : (l.result === 'OUTDATED' ? 'orange' : 'red')};">
+        <td>${l.date || ''}</td>
         <td>${l.result}</td>
         <td>${l.key}</td>
         <td>${l.resource}</td>
@@ -132,7 +133,14 @@ app.post('/add-license', async (req, res) => {
   const { key } = req.body
   if (!key) return res.redirect('/')
 
-  await supabase.from('licenses').insert([{ key }])
+  const { error } = await supabase.from('licenses').insert([{ key }])
+
+  if (error) {
+    console.log('ERROR INSERT LICENSE:', error)
+  } else {
+    console.log('LICENCIA AÑADIDA:', key)
+  }
+
   res.redirect('/')
 })
 
@@ -158,7 +166,7 @@ app.get('/unban/:key', async (req, res) => {
   res.redirect('/')
 })
 
-// ===== API CHECK (FiveM) =====
+// ===== API VERIFY =====
 app.get('/verify', async (req, res) => {
 
   const { key, resource, version } = req.query
@@ -168,8 +176,8 @@ app.get('/verify', async (req, res) => {
   const { data: license } = await supabase.from('licenses').select('*').eq('key', key)
   const { data: banned } = await supabase.from('banned').select('*').eq('key', key)
 
-  if (banned.length > 0) result = 'BANNED'
-  else if (license.length > 0) result = 'OK'
+  if ((banned || []).length > 0) result = 'BANNED'
+  else if ((license || []).length > 0) result = 'OK'
 
   if (version !== process.env.CURRENT_VERSION) {
     result = 'OUTDATED'
