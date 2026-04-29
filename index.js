@@ -1,138 +1,199 @@
-const express = require("express");
-const cors = require("cors");
-const session = require("express-session");
-const { createClient } = require("@supabase/supabase-js");
+const express = require('express')
+const session = require('express-session')
+const { createClient } = require('@supabase/supabase-js')
 
-const app = express();
-const PORT = process.env.PORT || 10000;
+const app = express()
 
-// =====================
-// ENV (Render)
-// =====================
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+// ===== SUPABASE =====
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+)
 
-// =====================
-// SUPABASE CLIENT
-// =====================
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// ===== MIDDLEWARE =====
+app.use(express.urlencoded({ extended: true }))
+app.use(express.json())
 
-// =====================
-// MIDDLEWARE
-// =====================
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'secret',
+  resave: false,
+  saveUninitialized: false
+}))
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "secret",
-    resave: false,
-    saveUninitialized: true,
-  })
-);
-
-// =====================
-// LOGIN SIMPLE
-// =====================
-app.post("/login", (req, res) => {
-  const { password } = req.body;
-
-  if (password === ADMIN_PASSWORD) {
-    req.session.auth = true;
-    return res.json({ ok: true });
-  }
-
-  return res.status(401).json({ error: "Incorrect password" });
-});
-
-function auth(req, res, next) {
-  if (req.session.auth) return next();
-  return res.status(401).json({ error: "Unauthorized" });
+// ===== AUTH =====
+function requireLogin(req, res, next) {
+  if (!req.session.logged) return res.redirect('/login')
+  next()
 }
 
-// =====================
-// DASHBOARD DATA
-// =====================
-app.get("/stats", auth, async (req, res) => {
-  const { data: licenses } = await supabase.from("licenses").select("*");
-  const { data: banned } = await supabase.from("banned").select("*");
-  const { data: logs } = await supabase.from("logs").select("*");
+// ===== LOGIN =====
+app.get('/login', (req, res) => {
+  res.send(`
+    <h2>Login</h2>
+    <form method="POST">
+      <input type="password" name="password" placeholder="Contraseña" required />
+      <button type="submit">Entrar</button>
+    </form>
+  `)
+})
 
-  const safeLogs = logs || [];
+app.post('/login', (req, res) => {
+  if (req.body.password === process.env.ADMIN_PASSWORD) {
+    req.session.logged = true
+    return res.redirect('/')
+  }
+  res.send('Contraseña incorrecta')
+})
 
-  const okLogs = safeLogs.filter((l) => l?.result === "OK").length;
-  const failLogs = safeLogs.filter((l) => l?.result !== "OK").length;
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/login'))
+})
 
-  res.json({
-    licenses: licenses?.length || 0,
-    banned: banned?.length || 0,
-    okLogs,
-    failLogs,
-  });
-});
+// ===== PANEL =====
+app.get('/', requireLogin, async (req, res) => {
 
-// =====================
-// ADD LICENSE
-// =====================
-app.post("/license/add", auth, async (req, res) => {
-  const { key } = req.body;
+  const { data: licenses } = await supabase.from('licenses').select('*')
+  const { data: banned } = await supabase.from('banned').select('*')
+  const { data: logs } = await supabase.from('logs').select('*').order('id', { ascending: false })
 
-  if (!key) return res.status(400).json({ error: "Missing key" });
+  // 🔥 FIX NULL
+  const safeLicenses = licenses || []
+  const safeBanned = banned || []
+  const safeLogs = logs || []
 
-  const { data, error } = await supabase
-    .from("licenses")
-    .insert([{ key }]);
+  const okLogs = safeLogs.filter(l => l.result === 'OK').length
+  const failLogs = safeLogs.length - okLogs
 
-  console.log("ADD LICENSE:", { data, error });
+  res.send(`
+  <html>
+  <body style="background:#0b1320;color:white;font-family:sans-serif;padding:20px;">
 
-  res.json({ ok: true });
-});
+  <h1>MRFIVE License Dashboard</h1>
+  <a href="/logout" style="color:red;">Cerrar sesión</a>
 
-// =====================
-// BAN LICENSE
-// =====================
-app.post("/license/ban", auth, async (req, res) => {
-  const { key } = req.body;
+  <div style="display:flex;gap:20px;margin-top:20px;">
+    <div>Licencias: ${safeLicenses.length}</div>
+    <div>Baneadas: ${safeBanned.length}</div>
+    <div>Logs OK: ${okLogs}</div>
+    <div>Logs fallidos: ${failLogs}</div>
+  </div>
 
-  if (!key) return res.status(400).json({ error: "Missing key" });
+  <h2>Añadir licencia</h2>
+  <form method="POST" action="/add-license">
+    <input name="key" placeholder="cfxk_xxxx" required>
+    <button type="submit">Añadir</button>
+  </form>
 
-  await supabase.from("banned").insert([{ key }]);
+  <h2>Banear licencia</h2>
+  <form method="POST" action="/ban-license">
+    <input name="key" placeholder="cfxk_xxxx" required>
+    <button type="submit">Banear</button>
+  </form>
 
-  res.json({ ok: true });
-});
+  <h2>Licencias autorizadas</h2>
+  ${safeLicenses.map(l => `
+    <div>
+      ${l.key}
+      <a href="/delete-license/${l.key}">❌</a>
+    </div>
+  `).join('')}
 
-// =====================
-// LOG REQUEST
-// =====================
-app.post("/log", async (req, res) => {
-  const { key, result, resource, version, ip } = req.body;
+  <h2>Licencias baneadas</h2>
+  ${safeBanned.map(l => `
+    <div>
+      ${l.key}
+      <a href="/unban/${l.key}">♻️</a>
+    </div>
+  `).join('')}
 
-  await supabase.from("logs").insert([
-    {
-      key,
-      result,
-      resource,
-      version,
-      ip,
-      date: new Date(),
-    },
-  ]);
+  <h2>Logs</h2>
 
-  res.json({ ok: true });
-});
+  <table border="1" cellpadding="5">
+    <tr>
+      <th>Fecha</th><th>Resultado</th><th>Key</th><th>Resource</th><th>Versión</th>
+    </tr>
+    ${safeLogs.map(l => `
+      <tr style="color:${l.result === 'OK' ? 'lime' : (l.result === 'OUTDATED' ? 'orange' : 'red')};">
+        <td>${l.date || ''}</td>
+        <td>${l.result}</td>
+        <td>${l.key}</td>
+        <td>${l.resource}</td>
+        <td>${l.version}</td>
+      </tr>
+    `).join('')}
+  </table>
 
-// =====================
-// HEALTH CHECK
-// =====================
-app.get("/", (req, res) => {
-  res.send("MRFIVE API RUNNING 🚀");
-});
+  </body>
+  </html>
+  `)
+})
 
-// =====================
-// START SERVER
-// =====================
-app.listen(PORT, () => {
-  console.log("API running on port", PORT);
-});
+// ===== AÑADIR LICENCIA =====
+app.post('/add-license', async (req, res) => {
+  const { key } = req.body
+  if (!key) return res.redirect('/')
+
+  const { error } = await supabase.from('licenses').insert([{ key }])
+
+  if (error) {
+    console.log('ERROR INSERT LICENSE:', error)
+  } else {
+    console.log('LICENCIA AÑADIDA:', key)
+  }
+
+  res.redirect('/')
+})
+
+// ===== BORRAR LICENCIA =====
+app.get('/delete-license/:key', async (req, res) => {
+  await supabase.from('licenses').delete().eq('key', req.params.key)
+  res.redirect('/')
+})
+
+// ===== BANEAR =====
+app.post('/ban-license', async (req, res) => {
+  const { key } = req.body
+
+  await supabase.from('banned').insert([{ key }])
+  await supabase.from('licenses').delete().eq('key', key)
+
+  res.redirect('/')
+})
+
+// ===== DESBANEAR =====
+app.get('/unban/:key', async (req, res) => {
+  await supabase.from('banned').delete().eq('key', req.params.key)
+  res.redirect('/')
+})
+
+// ===== API VERIFY =====
+app.get('/verify', async (req, res) => {
+
+  const { key, resource, version } = req.query
+
+  let result = 'NO_AUTH'
+
+  const { data: license } = await supabase.from('licenses').select('*').eq('key', key)
+  const { data: banned } = await supabase.from('banned').select('*').eq('key', key)
+
+  if ((banned || []).length > 0) result = 'BANNED'
+  else if ((license || []).length > 0) result = 'OK'
+
+  if (version !== process.env.CURRENT_VERSION) {
+    result = 'OUTDATED'
+  }
+
+  await supabase.from('logs').insert([{
+    result,
+    key,
+    resource,
+    version,
+    ip: req.ip
+  }])
+
+  res.json({ status: result })
+})
+
+// ===== START =====
+const PORT = process.env.PORT || 10000
+app.listen(PORT, () => console.log('API running on', PORT))
